@@ -7,7 +7,7 @@ Window = {
   opts = {
     direction = SplitDirection.BOTTOM,
   },
-  body = nil,
+  body = {},
   text = rx.Subject,
   texts = rx.Subject,
 }
@@ -18,19 +18,22 @@ Window = {
 ---@field modifiable boolean?
 ---@field type string?
 ---@field command string?
+---@field shortcutKey string? A shortcutKey to map to this window, triggering the key will results in toggling this window focus/show/hide
 WindowOptionsOptions = {}
 
 ---@class WindowOptions
 ---@field name string
 ---@field opts WindowOptionsOptions
+---@field body table Table of Windows which is to be rendered as a child window(s) to this one
+---@field text rx.Subject Topic to put a text in which will be appended to this window display
+---@field texts rx.Subject Topic to put text(s) in which will be rendered to this window, all previous will be overwrites
 WindowOptions = {}
 
 function Window:new(o)
   o = o or {}
   setmetatable(o, self)
   self.__index = self
-  o.text = rx.Subject.create()
-  o.texts = rx.Subject.create()
+  o:_setup()
   return o
 end
 
@@ -50,11 +53,20 @@ function Window:render(parent)
     )
   end
 
+  if parent == MainWindow then
+    if MainWindow.body == nil then
+      MainWindow.body = {}
+    end
+    table.insert(parent.body, self)
+  end
+
+  self.parent = parent
+
   local renderCommand, optionsCommand = self:getCmd()
   vim.api.nvim_set_current_win(parent.handle)
   vim.cmd(renderCommand)
   self.handle = vim.api.nvim_get_current_win()
-  if self.opts.type == 'term' then
+  if self.opts.type == "term" then
     self.termJobId = vim.o.channel
     print("termJobId =", self.termJobId)
   end
@@ -72,11 +84,12 @@ function Window:render(parent)
     self:overwrites(x)
   end)
 
+  self.isRendered = true
+
   return self
 end
 
-function Window:afterRender()
-end
+function Window:afterRender() end
 
 function Window:renderBody()
   if self.body == nil then
@@ -105,7 +118,7 @@ function Window:getCmd()
     options = options .. "|set nomodifiable"
   end
 
-  if opts.type == 'term' then
+  if opts.type == "term" then
     command = command .. "|term"
     if opts.command ~= nil then
       command = command .. " " .. opts.command
@@ -133,14 +146,20 @@ function Window:size(width, height)
 end
 
 function Window:runCommand(command)
-  self:runInBuffer(function() vim.cmd(command) end)
+  self:runInBuffer(function()
+    vim.cmd(command)
+  end)
 end
 
 function Window:runInBuffer(fn)
   local prevWin = vim.api.nvim_get_current_win()
   vim.api.nvim_set_current_win(self.handle)
   fn()
-  vim.api.nvim_set_current_win(prevWin)
+  if prevWin == self.handle then
+    vim.api.nvim_set_current_win(MainWindow.handle)
+  else
+    vim.api.nvim_set_current_win(prevWin)
+  end
 end
 
 function Window:modifyInBuffer(fn)
@@ -196,5 +215,82 @@ end
 
 -- Clear the window buffer, deleting all lines
 function Window:clear()
-  self:modifyInBuffer(function() vim.cmd('normal ggdG') end)
+  self:modifyInBuffer(function()
+    vim.cmd("normal ggdG")
+  end)
 end
+
+---@private
+function Window:_setup()
+  self.text = rx.Subject.create()
+  self.texts = rx.Subject.create()
+  self.isRendered = false
+  self:bindKey()
+end
+
+function Window:bindKey()
+  if self.opts.shortcutKey == nil then
+    return
+  end
+
+  -- if the key is set here then the key will be mapped
+  vim.keymap.set({ "n", "i", "v" }, self.opts.shortcutKey, ":UinvimToggleWindow " .. self.name .. "<CR>")
+end
+
+function Window:getFirstParentThatIsStillRendered()
+  if self.parent.isRendered then
+    return self.parent
+  else
+    print("self.parent.name =", self.parent.name)
+    print("self.parent.isRendered =", self.parent.isRendered)
+    print("self.parent.parent =", self.parent.parent)
+    return self.parent.parent:getFirstParentThatIsStillRendered()
+  end
+end
+
+function Window:toggle()
+  if self:isFocused() then
+    self:hide()
+  elseif self.isRendered then
+    self:focus()
+  else
+    self:render(self:getFirstParentThatIsStillRendered())
+    self:focus()
+  end
+end
+
+function Window:hide()
+  self:runCommand("quit")
+  self.isRendered = false
+  MainWindow:focus()
+end
+
+function Window:focus()
+  vim.api.nvim_set_current_win(self.handle)
+end
+
+function Window:isFocused()
+  return self.handle == vim.api.nvim_get_current_win()
+end
+
+---@param win Window
+---@param id string
+local function getWindows(win, id)
+  for _, v in pairs(win.body) do
+    if v.name == id then
+      return v
+    end
+    return getWindows(v, id)
+  end
+end
+
+function UinvimToggleWindow(opts)
+  local id = opts.args
+  local window = getWindows(MainWindow, id)
+  if window == nil then
+    error("Cannot find window with identifier '" .. id .. "'")
+  end
+  window:toggle()
+end
+
+vim.api.nvim_create_user_command("UinvimToggleWindow", UinvimToggleWindow, { nargs = "?" })
