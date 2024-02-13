@@ -1,0 +1,5 @@
+require('uinvim.window')
+require('uinvim.main-window')
+require('uinvim.selection-window')
+require('uinvim.term-window')
+require('uinvim.split-direction')
